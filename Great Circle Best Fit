@@ -1,0 +1,75 @@
+
+
+# Constants
+EARTH_RADIUS = 6371  # Earth's radius in kilometers
+
+# Input data (rounded to 3 decimal places for privacy)
+names = ['Tyler', 'John', 'Steve', 'Michael', 'Vince', 'Drew', 'Will']
+latitudes = np.array([44.023, 42.994, 41.910, 41.878, 41.703, 40.126, 38.041])
+longitudes = np.array([-92.481, -89.568, -87.643, -87.635, -86.233, -82.929, -78.506])
+
+# Convert (lat, lon) to 3D Cartesian coordinates
+def latlon_to_xyz(lat, lon, radius=EARTH_RADIUS):
+    lat_rad = np.radians(lat)
+    lon_rad = np.radians(lon)
+    x = radius * np.cos(lat_rad) * np.cos(lon_rad)
+    y = radius * np.cos(lat_rad) * np.sin(lon_rad)
+    z = radius * np.sin(lat_rad)
+    return np.vstack((x, y, z)).T
+
+# Fit a plane through the origin using Singular Value Decomposition (SVD)
+def fit_plane_through_origin(XYZ):
+    _, _, Vt = np.linalg.svd(XYZ)
+    normal = Vt[-1]
+    print(normal / np.linalg.norm(normal))
+    return normal / np.linalg.norm(normal)
+
+# Generate great circle points from the normal vector to the best-fit plane
+def generate_great_circle(normal, radius=EARTH_RADIUS, num_points=360):
+    # Find two orthogonal vectors in the plane
+    v = np.random.randn(3)
+    v -= np.dot(v, normal) * normal  # make v orthogonal to normal
+    v /= np.linalg.norm(v)
+    w = np.cross(normal, v)
+
+    # Generate points on the great circle
+    angles = np.linspace(0, 2 * np.pi, num_points)
+    points = np.array([
+        radius * (np.cos(a) * v + np.sin(a) * w)
+        for a in angles
+    ])
+    print(v, w)
+    return points
+
+# Main pipeline
+XYZ = latlon_to_xyz(latitudes, longitudes)
+normal_vector = fit_plane_through_origin(XYZ)
+great_circle_pts = generate_great_circle(normal_vector)
+
+# Plotting
+fig = plt.figure(figsize=(20, 16))
+ax = fig.add_subplot(111, projection='3d')
+
+# Plot the Earth as a transparent sphere
+u = np.linspace(0, 2 * np.pi, 100)
+v = np.linspace(0, np.pi, 100)
+x = EARTH_RADIUS * np.outer(np.cos(u), np.sin(v))
+y = EARTH_RADIUS * np.outer(np.sin(u), np.sin(v))
+z = EARTH_RADIUS * np.outer(np.ones(np.size(u)), np.cos(v))
+ax.plot_surface(x, y, z, color='lightblue', alpha=0.3, linewidth=0)
+
+# Plot data points
+ax.scatter(XYZ[:, 0], XYZ[:, 1], XYZ[:, 2], color='red', s=50)
+#for i, name in enumerate(names):
+    #ax.text(XYZ[i, 0], XYZ[i, 1], XYZ[i, 2], name, color='black')
+
+# Plot the great circle
+ax.plot(great_circle_pts[:, 0], great_circle_pts[:, 1], great_circle_pts[:, 2], color='green', linewidth=2)
+
+# Style the 3D plot
+ax.set_title('Best-Fit Great Circle Through Points on Earth')
+ax.set_box_aspect([1, 1, 1])  # Equal aspect ratio
+ax.set_axis_off()             # Hide axes for a clean look
+
+plt.tight_layout()
+plt.show()
