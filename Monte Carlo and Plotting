@@ -1,0 +1,304 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import multivariate_normal
+import re
+
+# load the data from github
+cities_df = pd.read_csv("https://raw.githubusercontent.com/davidjosephale/Rochester-Richmond-Line/refs/heads/main/top100cities%20(3).csv")
+
+# convert from degrees/minutes/seconds to decimals
+def dms_to_decimal(dms):
+    match = re.match(r"(\d+)°(\d+)?′?([NSWE])", dms.strip())
+    if not match:
+        return None
+    degrees = int(match.group(1))
+    minutes = int(match.group(2) or 0)
+    direction = match.group(3)
+    decimal = degrees + minutes / 60
+    if direction in ['S', 'W']:
+        decimal *= -1
+    return decimal
+
+# unpacking the files for ease
+cities_df["lat"] = cities_df["latitude"].apply(dms_to_decimal)
+cities_df["lon"] = cities_df["longitude"].apply(dms_to_decimal)
+cities_df = cities_df.dropna(subset=["lat", "lon"])
+cities_df["pop_weight"] = cities_df["population_2020"] / cities_df["population_2020"].max()
+
+# load in the alumni data and normalize it 
+nd_alumni_df = pd.read_csv("https://raw.githubusercontent.com/davidjosephale/Rochester-Richmond-Line/refs/heads/main/Nd_alumni.csv")
+nd_alumni_df["People"] = pd.to_numeric(nd_alumni_df["People"], errors="coerce")
+nd_alumni_df = nd_alumni_df.dropna(subset=["People"])
+nd_alumni_df["People"] /= nd_alumni_df["People"].sum()
+
+# load in state centroids
+centroids_url = "https://raw.githubusercontent.com/davidjosephale/Rochester-Richmond-Line/refs/heads/main/Lat%3Alon.csv"
+df_centroids = pd.read_csv(centroids_url)
+
+# Create dictionary: { 'State': (lat, lon) }
+state_centroids = {
+    row['state']: (row['latitude'], row['longitude']) 
+    for _, row in df_centroids.iterrows()
+}
+
+# defining the gride that we are looking at 
+lat_range = np.linspace(25, 50, 300)
+lon_range = np.linspace(-125, -65, 300)
+grid_lat, grid_lon = np.meshgrid(lat_range, lon_range)
+south_bend_coords = [41.6764, -86.2520]
+
+
+
+
+# TUNABLE PARAMTERS - adjust these to factor in the various weights
+params = {
+    "city_std_dev": 2.5,
+    "city_strength_scale": 2.2,
+    "nd_std_dev": 3.1,
+    "nd_strength": 0.25
+}
+
+
+
+
+# Define Chicago coordinates explicitly
+# as any ND alum knows, we need to add some confounding variables when it comes to the Windy city
+chicago_coords = np.array([41.8781, -87.6298])  # lat, lon
+
+# you can also adjust the boost strength and spread here to account for Chi-town influence
+def city_proximity_boost(city_lat, city_lon, south_bend_coords, chicago_coords, boost_strength=6.5, boost_sigma=3.5):
+    city_coord = np.array([city_lat, city_lon])
+    # distance to South Bend
+    dist_sb = np.linalg.norm(city_coord - np.array(south_bend_coords))
+    # distance to Chicago
+    dist_chi = np.linalg.norm(city_coord - chicago_coords)
+    
+    # proximity boost centered on Chicago (strong peak)
+    chi_boost = boost_strength * np.exp(- (dist_chi**2) / (2 * boost_sigma**2))
+    
+    # Total multiplier: base 1 plus Chicago and South Bend boosts
+    return 1 + chi_boost
+
+# generate the density distribution
+def generate_density(cities, south_bend_coords, city_std_dev, city_strength_scale, nd_std_dev, nd_strength):
+    density = np.zeros_like(grid_lat)
+    pos = np.dstack((grid_lat, grid_lon))
+    chicago_coords = [41.8781, -87.6298]
+
+    # iterate
+    for _, row in cities.iterrows():
+        proximity_factor = city_proximity_boost(row["lat"], row["lon"], south_bend_coords, chicago_coords)
+        rv = multivariate_normal([row["lat"], row["lon"]], [[city_std_dev**2, 0], [0, city_std_dev**2]])
+        # apply proximity factor here
+        density += city_strength_scale * row["pop_weight"] * proximity_factor * rv.pdf(pos)
+
+    nd_rv = multivariate_normal(south_bend_coords, [[nd_std_dev**2, 0], [0, nd_std_dev**2]])
+    density += nd_strength * nd_rv.pdf(pos)
+
+    return density / density.max()
+
+# generates dist of ND alumni
+def generate_nd_alumni_density(nd_alumni, std_dev=3.5):
+    density = np.zeros_like(grid_lat)
+    pos = np.dstack((grid_lat, grid_lon))
+    for _, row in nd_alumni.iterrows():
+        if row["State"] in state_centroids:
+            lat, lon = state_centroids[row["State"]]
+            rv = multivariate_normal([lat, lon], [[std_dev**2, 0], [0, std_dev**2]])
+            density += row["People"] * rv.pdf(pos)
+    return density / density.max()
+
+# generate heat maps
+population_density = generate_density(cities_df, south_bend_coords, **params)
+alumni_density = generate_nd_alumni_density(nd_alumni_df)
+
+# plotting
+fig, axs = plt.subplots(1, 2, figsize=(16, 6))
+fig.patch.set_facecolor('black')
+#style
+for ax in axs:
+    ax.set_facecolor('black')        
+    ax.tick_params(colors='white')   
+    ax.xaxis.label.set_color('white')  
+    ax.yaxis.label.set_color('white')  
+    ax.title.set_color('white')        
+    # Set legend text and frame to white
+    legend = ax.get_legend()
+    if legend:
+        for text in legend.get_texts():
+            text.set_color('white')
+        legend.get_frame().set_facecolor('black')
+        legend.get_frame().set_edgecolor('white')
+
+# population + ND pull
+c1 = axs[0].contourf(lon_range, lat_range, population_density.T, levels=100, cmap='inferno')
+axs[0].set_title("US Population Density + Notre Dame Pull")
+axs[0].scatter(south_bend_coords[1], south_bend_coords[0], color='cyan', label='South Bend')
+axs[0].legend()
+fig.colorbar(c1, ax=axs[0])
+
+# actual ND alumni data
+c2 = axs[1].contourf(lon_range, lat_range, alumni_density.T, levels=100, cmap='inferno')
+axs[1].set_title("ND Alumni Geographic Distribution")
+axs[1].scatter(south_bend_coords[1], south_bend_coords[0], color='cyan', label='South Bend')
+axs[1].legend()
+fig.colorbar(c2, ax=axs[1])
+
+# Axis labels
+for ax in axs:
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+
+plt.tight_layout()
+plt.show()
+
+#
+#
+# MONTE CARLO SIMULATION
+#
+#
+
+from sklearn.decomposition import PCA
+import random
+
+from sklearn.decomposition import PCA
+
+# Define realistic U.S. mainland bounds
+LAT_MIN, LAT_MAX = 24.5, 49.5
+LON_MIN, LON_MAX = -124.8, -66.9
+
+# Sample points from density map within valid U.S. region
+def sample_points_from_density(density, lat_range, lon_range, n_points=7, max_attempts=1000):
+    flat_density = density.flatten()
+    flat_density /= flat_density.sum()
+
+    for attempt in range(max_attempts):
+        indices = np.random.choice(len(flat_density), size=n_points, p=flat_density)
+        lat_idx, lon_idx = np.unravel_index(indices, density.shape)
+        points = np.array([[lat_range[i], lon_range[j]] for i, j in zip(lat_idx, lon_idx)])
+
+        if all((LAT_MIN <= pt[0] <= LAT_MAX and LON_MIN <= pt[1] <= LON_MAX) for pt in points):
+            return points
+    
+    raise RuntimeError("Failed to sample valid points within U.S. bounds.")
+
+# PCA-based R²
+def compute_r2_pca(points):
+    pca = PCA(n_components=2)
+    pca.fit(points)
+    return pca.explained_variance_ratio_[0]
+
+# Fit PCA line
+def fit_pca_line(points):
+    pca = PCA(n_components=1)
+    pca.fit(points)
+    center = pca.mean_
+    direction = pca.components_[0]
+    return center, direction
+
+# Monte Carlo loop
+def run_monte_carlo_with_plots(density, lat_range, lon_range, n_points=7, n_iter=1000):
+    r2_values = []
+    example_lines = []
+
+    for i in range(n_iter):
+        try:
+            pts = sample_points_from_density(density, lat_range, lon_range, n_points)
+            r2 = compute_r2_pca(pts)
+            r2_values.append(r2)
+
+            if i < 5:
+                center, direction = fit_pca_line(pts)
+                example_lines.append((pts, center, direction))
+        except RuntimeError:
+            continue  # skip if no valid sample
+
+    return r2_values, example_lines
+
+# Run it
+r2_values, examples = run_monte_carlo_with_plots(population_density, lat_range, lon_range, n_points=7, n_iter=100000)
+
+# histogram
+plt.figure(figsize=(10, 5), facecolor='black')
+ax = plt.gca()
+ax.set_facecolor('black')
+ax.tick_params(colors='white')
+plt.hist(r2_values, bins=100, color='#000080', edgecolor='black')
+plt.axvline(0.9985, color='red', linestyle='--', label='Rochester-Richmond Line R²')
+plt.title('Monte Carlo R² Distribution (100k Trials)', color='white')
+plt.xlabel('R² Value', color='white')
+plt.ylabel('Frequency', color='white')
+plt.xticks(color='white')
+plt.yticks(color='white')
+plt.legend(facecolor='black', edgecolor='white', labelcolor='white')
+plt.grid(color='white', alpha=0.1)  # faint white gridlines
+plt.show()
+
+# Convert list to numpy array
+r2_array = np.array(r2_values)
+
+# Calculate the percentile rank of 0.9985
+friend_r2 = 0.9985
+percentile = (r2_array < friend_r2).sum() / len(r2_array) * 100
+
+print(f"An R² of {friend_r2} is higher than approximately {percentile:.2f}% of all simulations.")
+
+# Plot first 5 examples
+for i, (pts, center, direction) in enumerate(examples):
+    plt.figure(figsize=(6, 6), facecolor='black')
+    ax = plt.gca()
+    ax.set_facecolor('black')
+    ax.tick_params(colors='white')
+    
+    plt.scatter(pts[:, 1], pts[:, 0], color='cyan', label='Sampled Points')
+
+    # Draw PCA line
+    scale = 10
+    line_pts = np.array([
+        center - scale * direction,
+        center + scale * direction
+    ])
+    plt.plot(line_pts[:, 1], line_pts[:, 0], color='orange', label='Best-Fit PCA Line')
+    
+    # Add R² text box in the upper right corner of the plot
+    r2 = r2_values[i]  # Assuming you have r2_values list or array
+    ax.text(0.95, 0.05, f'$R^2 = {r2:.4f}$',
+            color='white', fontsize=12,
+            ha='right', va='bottom',
+            transform=ax.transAxes,
+            bbox=dict(facecolor='black', alpha=0.5, edgecolor='white'))
+
+    plt.xlabel('Longitude', color='white')
+    plt.ylabel('Latitude', color='white')
+    plt.xlim(-125, -65)
+    plt.ylim(25,50)
+    plt.title(f'Example {i+1}: PCA Fit', color='white')
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.show()
+
+
+# Sort R² values for the CDF
+sorted_r2 = np.sort(r2_array)
+cdf = np.arange(1, len(sorted_r2)+1) / len(sorted_r2)
+
+plt.figure(figsize=(10, 6), facecolor='black')
+ax = plt.gca()
+ax.set_facecolor('black')
+
+plt.plot(sorted_r2, cdf, color='white', linewidth=2)
+plt.axvline(friend_r2, color='cyan', linestyle='--', linewidth=2, label=f"Rochester-Richmond Line R² = {friend_r2}")
+plt.axhline(percentile / 100, color='cyan', linestyle='--', linewidth=1)
+
+plt.title("Cumulative Distribution of R² Values", color='white')
+plt.xlabel("R² Value", color='white')
+plt.ylabel("Cumulative Probability", color='white')
+plt.xticks(color='white')
+plt.yticks(color='white')
+plt.xlim(0.995,1)
+plt.ylim(0.995,1)
+plt.grid(True, color='white', alpha=0.1)
+plt.legend(facecolor='black', edgecolor='white', labelcolor='white')
+plt.tight_layout()
+plt.show()
